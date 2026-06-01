@@ -137,6 +137,199 @@ function getGradientStyle(name) {
   return `background: linear-gradient(135deg, hsl(${hue1}, 75%, 55%), hsl(${hue2}, 75%, 40%));`;
 }
 
+function getDaysLeftInWeek(weekEndObj) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const end = new Date(weekEndObj);
+  end.setHours(0, 0, 0, 0);
+  const diff = end - today;
+  const days = Math.round(diff / (1000 * 60 * 60 * 24));
+  if (days < 0) return '0 days left';
+  if (days === 0) return 'last day';
+  if (days === 1) return '1 day left';
+  return `${days} days left`;
+}
+
+function getDaysForWeeklyTasks(targetCount, weekStartObj) {
+  const dates = [];
+  const distribution = {
+    1: [2], // Wednesday
+    2: [1, 3], // Tuesday, Thursday
+    3: [0, 2, 4], // Monday, Wednesday, Friday
+    4: [0, 2, 4, 6], // Monday, Wednesday, Friday, Sunday
+    5: [0, 1, 2, 3, 4], // Mon-Fri
+    6: [0, 1, 2, 3, 4, 5], // Mon-Sat
+    7: [0, 1, 2, 3, 4, 5, 6] // Mon-Sun
+  };
+  
+  let days = [];
+  if (targetCount <= 7) {
+    days = distribution[targetCount] || [2];
+  } else {
+    for (let i = 0; i < targetCount; i++) {
+      days.push(i % 7);
+    }
+  }
+  
+  for (const dayIndex of days) {
+    const d = new Date(weekStartObj);
+    d.setDate(weekStartObj.getDate() + dayIndex);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const dayVal = String(d.getDate()).padStart(2, '0');
+    dates.push(`${y}-${m}-${dayVal}`);
+  }
+  return dates;
+}
+
+async function autoScheduleChannelTasks(channel, scheduleMethod) {
+  const uid = state.currentUser.uid;
+  const channelId = channel.id;
+  const targetCount = channel.targetTasks !== undefined ? channel.targetTasks : 3;
+  const freq = channel.frequency || 'weekly';
+  const todayStr = getTodayStr();
+  const week = getWeekRange();
+
+  try {
+    // 1. Get existing videos for the channel to remove any pending videos for this period
+    const existingVideos = await getVideos(uid, channelId);
+    const pendingVideosToDelete = existingVideos.filter(v => {
+      if (v.status !== 'pending') return false;
+      if (freq === 'daily') {
+        return v.scheduledDate === todayStr;
+      } else {
+        return v.scheduledDate >= week.start && v.scheduledDate <= week.end;
+      }
+    });
+
+    for (const v of pendingVideosToDelete) {
+      await deleteVideo(uid, channelId, v.id);
+    }
+
+    // 2. Determine target dates
+    let targetDates = [];
+    if (freq === 'daily') {
+      for (let i = 0; i < targetCount; i++) {
+        targetDates.push(todayStr);
+      }
+    } else {
+      targetDates = getDaysForWeeklyTasks(targetCount, week.startDateObj);
+    }
+
+    // 3. Determine video titles
+    let titles = [];
+    if (scheduleMethod === 'topic') {
+      const allTopics = await getTopics(uid, channelId);
+      const availableTopics = allTopics.filter(t => !t.isUsed);
+      
+      for (let i = 0; i < targetCount; i++) {
+        if (i < availableTopics.length) {
+          const topic = availableTopics[i];
+          titles.push({ title: topic.title, topicId: topic.id });
+        } else {
+          titles.push({ title: `${channel.channelName} - Random Video #${i + 1}`, topicId: null });
+        }
+      }
+    } else {
+      for (let i = 0; i < targetCount; i++) {
+        titles.push({ title: `${channel.channelName} - Random Video #${i + 1}`, topicId: null });
+      }
+    }
+
+    // 4. Add the videos to Firestore and update topics status
+    for (let i = 0; i < targetCount; i++) {
+      const scheduledDate = targetDates[i];
+      const videoInfo = titles[i];
+      
+      await addVideo(uid, channelId, videoInfo.title, scheduledDate);
+      
+      if (videoInfo.topicId) {
+        await updateTopic(uid, channelId, videoInfo.topicId, { isUsed: true });
+      }
+    }
+
+    showToast(`Successfully scheduled ${targetCount} tasks!`, 'success');
+  } catch (err) {
+    console.error("Auto scheduling error:", err);
+    showToast(`Failed to auto-schedule: ${err.message}`, 'error');
+  }
+}
+
+function openAutoScheduleModal(channel, onComplete) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.id = 'auto-schedule-modal';
+  
+  const frequency = channel.frequency || 'weekly';
+  const targetTasks = channel.targetTasks !== undefined ? channel.targetTasks : 3;
+
+  overlay.innerHTML = `
+    <div class="modal-content animate-fade-in" style="max-width: 460px;">
+      <div class="modal-header">
+        <h3 class="modal-title">Auto-Schedule Task Settings</h3>
+        <button class="btn-modal-close" id="close-auto-sched-btn"><i data-lucide="x"></i></button>
+      </div>
+      <div>
+        <p style="font-size: 0.95rem; color: var(--text-secondary); margin-bottom: 1.25rem; line-height: 1.5;">
+          Choose how you would like to auto-populate the calendar for <strong>${channel.channelName}</strong>. 
+          The system will auto-populate <strong>${targetTasks}</strong> tasks for the current <strong>${frequency}</strong> period.
+        </p>
+        
+        <div style="display: flex; flex-direction: column; gap: 1rem; margin-bottom: 1.5rem;">
+          <label class="auto-sched-option-card">
+            <input type="radio" name="auto-sched-method" value="topic" checked>
+            <div class="option-details">
+              <strong>Topic Video Bucket</strong>
+              <span>Fetch unused ideas from this channel's Topic Bucket. If there are not enough ideas, placeholder random videos will be used for the rest.</span>
+            </div>
+          </label>
+          
+          <label class="auto-sched-option-card">
+            <input type="radio" name="auto-sched-method" value="random">
+            <div class="option-details">
+              <strong>Random Videos</strong>
+              <span>Generate placeholder titles like: <em>${channel.channelName} - Random Video #1</em>.</span>
+            </div>
+          </label>
+        </div>
+      </div>
+      
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline" id="skip-auto-sched-btn">Skip Scheduling</button>
+        <button type="button" class="btn btn-primary" id="run-auto-sched-btn">Auto-Schedule Tasks</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  lucide.createIcons();
+
+  const close = () => {
+    overlay.remove();
+    if (onComplete) onComplete();
+  };
+
+  document.getElementById('close-auto-sched-btn').addEventListener('click', close);
+  document.getElementById('skip-auto-sched-btn').addEventListener('click', close);
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) close();
+  });
+
+  document.getElementById('run-auto-sched-btn').addEventListener('click', async () => {
+    const method = overlay.querySelector('input[name="auto-sched-method"]:checked').value;
+    close();
+    
+    renderLoading('app-container', 'Generating automatic video task schedules...');
+    await autoScheduleChannelTasks(channel, method);
+    
+    if (window.location.hash.startsWith('#workshop/')) {
+      const channelId = window.location.hash.split('/')[1];
+      renderWorkshop(channelId);
+    } else {
+      renderDashboard();
+    }
+  });
+}
+
 // ==========================================================================
 // Core Authentication Guard
 // ==========================================================================
@@ -471,6 +664,15 @@ async function renderDashboard() {
   try {
     state.channels = await getChannels(state.currentUser.uid);
     if (state.channels.length > 0) {
+      // Sort channels so that daily frequency channels are listed first
+      state.channels.sort((a, b) => {
+        const freqA = a.frequency || 'weekly';
+        const freqB = b.frequency || 'weekly';
+        if (freqA === 'daily' && freqB !== 'daily') return -1;
+        if (freqA !== 'daily' && freqB === 'daily') return 1;
+        return 0;
+      });
+
       const videoFetchPromises = state.channels.map(async (c) => {
         const vids = await getVideos(state.currentUser.uid, c.id);
         return vids.map(v => ({ ...v, channelId: c.id, channelName: c.channelName }));
@@ -651,7 +853,7 @@ async function renderDashboard() {
           <!-- Target Tasks Left and Checklist section inside Card -->
           <div class="channel-card-tasks">
             <div class="channel-card-tasks-header">
-              <span class="tasks-left-label">Tasks for ${periodText}:</span>
+              <span class="tasks-left-label">Tasks for ${periodText}${freq === 'weekly' ? ` (${getDaysLeftInWeek(week.endDateObj)})` : ''}:</span>
               <span class="tasks-left-badge ${tasksLeft === 0 ? 'completed-badge' : ''}">
                 ${tasksLeft === 0 ? '<i data-lucide="check" style="width:10px;height:10px;display:inline;"></i> Done' : `${tasksLeft} Left (Goal: ${target})`}
               </span>
@@ -678,9 +880,12 @@ async function renderDashboard() {
           </div>
         </div>
         
-        <div class="card-actions" style="margin-top: 0; padding-top: 0.75rem;">
+        <div class="card-actions" style="margin-top: 0; padding-top: 0.75rem; gap: 0.5rem; flex-wrap: wrap;">
           <button class="btn-card-action" onclick="window.location.hash='#workshop/${channel.id}'">
             <i data-lucide="briefcase"></i> Open Workshop
+          </button>
+          <button class="btn-card-action btn-card-auto-schedule" data-id="${channel.id}" title="Auto-Schedule Videos">
+            <i data-lucide="calendar-plus"></i> Auto-Schedule
           </button>
           <button class="btn-card-delete" data-id="${channel.id}" aria-label="Delete Channel">
             <i data-lucide="trash-2"></i>
@@ -723,6 +928,16 @@ async function renderDashboard() {
       const channelId = btn.dataset.id;
       const channel = state.channels.find(c => c.id === channelId);
       openEditChannelModal(channel);
+    });
+  });
+
+  // Attach manual auto-scheduling listeners
+  grid.querySelectorAll('.btn-card-auto-schedule').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const channelId = btn.dataset.id;
+      const channel = state.channels.find(c => c.id === channelId);
+      openAutoScheduleModal(channel);
     });
   });
 
@@ -837,9 +1052,11 @@ function openAddChannelModal() {
     try {
       close();
       renderLoading('app-container', 'Saving channel...');
-      await addChannel(state.currentUser.uid, name, url, freq, targets);
+      const newChan = await addChannel(state.currentUser.uid, name, url, freq, targets);
       showToast(`Added channel "${name}"!`, 'success');
-      renderDashboard();
+      openAutoScheduleModal(newChan, () => {
+        renderDashboard();
+      });
     } catch (error) {
       renderDashboard();
       showToast(`Failed to add channel: ${error.message}`, 'error');
@@ -935,7 +1152,15 @@ function openEditChannelModal(channel) {
         targetTasks: targets
       });
       showToast(`Updated settings for "${name}"!`, 'success');
-      renderDashboard();
+      
+      if (channel.frequency !== freq || channel.targetTasks !== targets) {
+        const updatedChannel = { ...channel, channelName: name, youtubeUrl: url, frequency: freq, targetTasks: targets };
+        openAutoScheduleModal(updatedChannel, () => {
+          renderDashboard();
+        });
+      } else {
+        renderDashboard();
+      }
     } catch (err) {
       renderDashboard();
       showToast(`Failed to update channel: ${err.message}`, 'error');
@@ -1491,7 +1716,10 @@ async function renderWorkshop(channelId) {
           `}
         </div>
       </div>
-      <div>
+      <div style="display: flex; gap: 0.75rem;">
+        <button class="btn btn-outline" id="auto-schedule-workshop-btn">
+          <i data-lucide="calendar-plus"></i> Auto-Schedule
+        </button>
         <button class="btn btn-primary" id="add-topic-btn">
           <i data-lucide="lightbulb"></i> Add Topic Idea
         </button>
@@ -1639,6 +1867,11 @@ async function renderWorkshop(channelId) {
 
   // Attach Topic Event Handlers
   document.getElementById('add-topic-btn').addEventListener('click', () => openTopicModal(null, channelId));
+  
+  const autoSchedWorkshopBtn = document.getElementById('auto-schedule-workshop-btn');
+  if (autoSchedWorkshopBtn) {
+    autoSchedWorkshopBtn.addEventListener('click', () => openAutoScheduleModal(channel));
+  }
   
   container.querySelectorAll('.btn-edit-topic').forEach(btn => {
     btn.addEventListener('click', () => {
