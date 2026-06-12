@@ -182,7 +182,7 @@ function getDaysForWeeklyTasks(targetCount, weekStartObj) {
   return dates;
 }
 
-async function autoScheduleChannelTasks(channel, scheduleMethod) {
+async function autoScheduleChannelTasks(channel, scheduleMethod, suppressToast = false) {
   const uid = state.currentUser.uid;
   const channelId = channel.id;
   const targetCount = channel.targetTasks !== undefined ? channel.targetTasks : 3;
@@ -248,10 +248,15 @@ async function autoScheduleChannelTasks(channel, scheduleMethod) {
       }
     }
 
-    showToast(`Successfully scheduled ${targetCount} tasks!`, 'success');
+    if (!suppressToast) {
+      showToast(`Successfully scheduled ${targetCount} tasks!`, 'success');
+    }
   } catch (err) {
     console.error("Auto scheduling error:", err);
-    showToast(`Failed to auto-schedule: ${err.message}`, 'error');
+    if (!suppressToast) {
+      showToast(`Failed to auto-schedule: ${err.message}`, 'error');
+    }
+    throw err;
   }
 }
 
@@ -327,6 +332,97 @@ function openAutoScheduleModal(channel, onComplete) {
     } else {
       renderDashboard();
     }
+  });
+}
+
+function openAutoScheduleAllModal() {
+  if (state.channels.length === 0) {
+    showToast('No channels configured to auto-schedule.', 'warning');
+    return;
+  }
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.id = 'auto-schedule-all-modal';
+  
+  overlay.innerHTML = `
+    <div class="modal-content animate-fade-in" style="max-width: 460px;">
+      <div class="modal-header">
+        <h3 class="modal-title">Bulk Auto-Schedule Settings</h3>
+        <button class="btn-modal-close" id="close-auto-sched-all-btn"><i data-lucide="x"></i></button>
+      </div>
+      <div>
+        <p style="font-size: 0.95rem; color: var(--text-secondary); margin-bottom: 1.25rem; line-height: 1.5;">
+          Choose how you would like to auto-populate the calendar for <strong>all ${state.channels.length} channels</strong>. 
+          The system will auto-populate tasks for each channel based on their individual frequency and target upload settings.
+        </p>
+        
+        <div style="display: flex; flex-direction: column; gap: 1rem; margin-bottom: 1.5rem;">
+          <label class="auto-sched-option-card">
+            <input type="radio" name="auto-sched-all-method" value="topic" checked>
+            <div class="option-details">
+              <strong>Topic Video Bucket</strong>
+              <span>Fetch unused ideas from each channel's Topic Bucket. If there are not enough ideas, placeholder random videos will be used for the rest.</span>
+            </div>
+          </label>
+          
+          <label class="auto-sched-option-card">
+            <input type="radio" name="auto-sched-all-method" value="random">
+            <div class="option-details">
+              <strong>Random Videos</strong>
+              <span>Generate placeholder titles like: <em>[Channel Name] - Random Video #N</em>.</span>
+            </div>
+          </label>
+        </div>
+      </div>
+      
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline" id="skip-auto-sched-all-btn">Cancel</button>
+        <button type="button" class="btn btn-primary" id="run-auto-sched-all-btn">Auto-Schedule All</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  lucide.createIcons();
+
+  const close = () => {
+    overlay.remove();
+  };
+
+  document.getElementById('close-auto-sched-all-btn').addEventListener('click', close);
+  document.getElementById('skip-auto-sched-all-btn').addEventListener('click', close);
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) close();
+  });
+
+  document.getElementById('run-auto-sched-all-btn').addEventListener('click', async () => {
+    const method = overlay.querySelector('input[name="auto-sched-all-method"]:checked').value;
+    close();
+    
+    renderLoading('app-container', 'Generating automatic video task schedules for all channels...');
+    
+    let successCount = 0;
+    let failCount = 0;
+    for (const channel of state.channels) {
+      if (channel.isBlocked) {
+        continue;
+      }
+      try {
+        await autoScheduleChannelTasks(channel, method, true);
+        successCount++;
+      } catch (err) {
+        console.error(`Failed to auto-schedule channel ${channel.channelName}:`, err);
+        failCount++;
+      }
+    }
+    
+    if (failCount === 0) {
+      showToast(`Successfully scheduled tasks for all ${successCount} channels!`, 'success');
+    } else {
+      showToast(`Scheduled tasks for ${successCount} channels. ${failCount} channels failed.`, 'warning');
+    }
+    
+    renderDashboard();
   });
 }
 
@@ -664,21 +760,56 @@ async function renderDashboard() {
   try {
     state.channels = await getChannels(state.currentUser.uid);
     if (state.channels.length > 0) {
-      // Sort channels so that daily frequency channels are listed first
-      state.channels.sort((a, b) => {
-        const freqA = a.frequency || 'weekly';
-        const freqB = b.frequency || 'weekly';
-        if (freqA === 'daily' && freqB !== 'daily') return -1;
-        if (freqA !== 'daily' && freqB === 'daily') return 1;
-        return 0;
-      });
-
       const videoFetchPromises = state.channels.map(async (c) => {
         const vids = await getVideos(state.currentUser.uid, c.id);
         return vids.map(v => ({ ...v, channelId: c.id, channelName: c.channelName }));
       });
       const vidsArray = await Promise.all(videoFetchPromises);
       allVideos = vidsArray.flat().sort((a, b) => new Date(a.scheduledDate) - new Date(b.scheduledDate));
+
+      // Calculate tasksLeft for each channel
+      const today = getTodayStr();
+      const week = getWeekRange();
+      
+      state.channels.forEach(channel => {
+        const videos = allVideos.filter(v => v.channelId === channel.id);
+        const freq = channel.frequency || 'weekly';
+        const target = channel.targetTasks !== undefined ? channel.targetTasks : 3;
+        
+        let filteredTasks = [];
+        if (freq === 'daily') {
+          filteredTasks = videos.filter(v => v.scheduledDate === today);
+        } else {
+          filteredTasks = videos.filter(v => v.scheduledDate >= week.start && v.scheduledDate <= week.end);
+        }
+        
+        const completedCount = filteredTasks.filter(t => t.status === 'done').length;
+        channel.tasksLeft = Math.max(0, target - completedCount);
+      });
+
+      // Sort channels: active first (with incomplete first, then done), blocked last
+      state.channels.sort((a, b) => {
+        const blockA = a.isBlocked ? 1 : 0;
+        const blockB = b.isBlocked ? 1 : 0;
+        if (blockA !== blockB) {
+          return blockA - blockB; // active (0) first, blocked (1) last
+        }
+        
+        // Both are active or both are blocked
+        if (!a.isBlocked) {
+          const doneA = a.tasksLeft === 0 ? 1 : 0;
+          const doneB = b.tasksLeft === 0 ? 1 : 0;
+          if (doneA !== doneB) {
+            return doneA - doneB; // incomplete (0) first, completed (1) last
+          }
+        }
+        
+        const freqA = a.frequency || 'weekly';
+        const freqB = b.frequency || 'weekly';
+        if (freqA === 'daily' && freqB !== 'daily') return -1;
+        if (freqA !== 'daily' && freqB === 'daily') return 1;
+        return 0;
+      });
     }
   } catch (err) {
     console.error("Dashboard error:", err);
@@ -758,9 +889,14 @@ async function renderDashboard() {
         <h2>Central Dashboard</h2>
         <p class="view-description">Track scheduled uploads and status badges for all active channels.</p>
       </div>
-      <button class="btn btn-primary" id="open-add-channel-modal-btn">
-        <i data-lucide="plus"></i> Add Channel
-      </button>
+      <div style="display: flex; gap: 0.75rem;">
+        <button class="btn btn-outline" id="auto-schedule-all-btn">
+          <i data-lucide="calendar-days"></i> Auto-Schedule All
+        </button>
+        <button class="btn btn-primary" id="open-add-channel-modal-btn">
+          <i data-lucide="plus"></i> Add Channel
+        </button>
+      </div>
     </div>
     
     <div class="dashboard-grid animate-fade-in" id="dashboard-grid" style="grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));">
@@ -771,6 +907,10 @@ async function renderDashboard() {
   // Render Channel Cards
   const grid = document.getElementById('dashboard-grid');
   document.getElementById('open-add-channel-modal-btn').addEventListener('click', openAddChannelModal);
+  const autoSchedBtn = document.getElementById('auto-schedule-all-btn');
+  if (autoSchedBtn) {
+    autoSchedBtn.addEventListener('click', openAutoScheduleAllModal);
+  }
 
   const cardsHtmlPromise = state.channels.map(async (channel) => {
     let badgeClass = 'badge-green';
@@ -785,7 +925,11 @@ async function renderDashboard() {
     const hasPendingToday = videos.some(v => v.status === 'pending' && v.scheduledDate === today);
     const hasPendingThisWeek = videos.some(v => v.status === 'pending' && v.scheduledDate >= week.start && v.scheduledDate <= week.end);
 
-    if (hasPendingToday) {
+    if (channel.isBlocked) {
+      badgeClass = 'badge-grey';
+      badgeLabel = 'Blocked';
+      badgeIcon = 'ban';
+    } else if (hasPendingToday) {
       badgeClass = 'badge-red';
       badgeLabel = 'Due Today';
       badgeIcon = 'alert-circle';
@@ -810,6 +954,16 @@ async function renderDashboard() {
       periodText = 'This Week';
     }
 
+    // Sort tasks: pending/uncompleted first, completed (done) last
+    filteredTasks.sort((a, b) => {
+      const isDoneA = a.status === 'done' ? 1 : 0;
+      const isDoneB = b.status === 'done' ? 1 : 0;
+      if (isDoneA !== isDoneB) {
+        return isDoneA - isDoneB;
+      }
+      return new Date(a.scheduledDate) - new Date(b.scheduledDate);
+    });
+
     const completedCount = filteredTasks.filter(t => t.status === 'done').length;
     const tasksLeft = Math.max(0, target - completedCount);
 
@@ -822,7 +976,7 @@ async function renderDashboard() {
     }
 
     return `
-      <div class="channel-card" data-id="${channel.id}">
+      <div class="channel-card ${channel.isBlocked ? 'blocked' : ''}" data-id="${channel.id}">
         <div>
           <div class="card-top">
             <div class="channel-info-wrapper">
@@ -870,7 +1024,7 @@ async function renderDashboard() {
                 const formattedDate = taskDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
                 return `
                   <div class="channel-card-task-row ${isCompleted ? 'completed' : ''}" data-video-id="${task.id}" data-channel-id="${channel.id}">
-                    <input type="checkbox" class="task-checkbox channel-card-checkbox" data-video-id="${task.id}" data-channel-id="${channel.id}" ${isCompleted ? 'checked' : ''} style="width:15px;height:15px;">
+                    <input type="checkbox" class="task-checkbox channel-card-checkbox" data-video-id="${task.id}" data-channel-id="${channel.id}" ${isCompleted ? 'checked' : ''} ${channel.isBlocked ? 'disabled' : ''} style="width:15px;height:15px;">
                     <span class="channel-card-task-text">${task.title}</span>
                     <span class="channel-card-task-date">${formattedDate}</span>
                   </div>
@@ -884,8 +1038,11 @@ async function renderDashboard() {
           <button class="btn-card-action" onclick="window.location.hash='#workshop/${channel.id}'">
             <i data-lucide="briefcase"></i> Open Workshop
           </button>
-          <button class="btn-card-action btn-card-auto-schedule" data-id="${channel.id}" title="Auto-Schedule Videos">
+          <button class="btn-card-action btn-card-auto-schedule" data-id="${channel.id}" title="Auto-Schedule Videos" ${channel.isBlocked ? 'disabled' : ''}>
             <i data-lucide="calendar-plus"></i> Auto-Schedule
+          </button>
+          <button class="btn-card-action btn-card-block" data-id="${channel.id}" title="${channel.isBlocked ? 'Unblock Channel' : 'Block Channel'}">
+            <i data-lucide="${channel.isBlocked ? 'unlock' : 'ban'}"></i> ${channel.isBlocked ? 'Unblock' : 'Block'}
           </button>
           <button class="btn-card-delete" data-id="${channel.id}" aria-label="Delete Channel">
             <i data-lucide="trash-2"></i>
@@ -937,7 +1094,28 @@ async function renderDashboard() {
       e.stopPropagation();
       const channelId = btn.dataset.id;
       const channel = state.channels.find(c => c.id === channelId);
+      if (channel.isBlocked) return;
       openAutoScheduleModal(channel);
+    });
+  });
+
+  // Attach block channel listeners
+  grid.querySelectorAll('.btn-card-block').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const channelId = btn.dataset.id;
+      const channel = state.channels.find(c => c.id === channelId);
+      const newBlockedState = !channel.isBlocked;
+      
+      try {
+        renderLoading('app-container', newBlockedState ? 'Blocking channel...' : 'Unblocking channel...');
+        await updateChannel(state.currentUser.uid, channelId, { isBlocked: newBlockedState });
+        showToast(newBlockedState ? `Blocked channel "${channel.channelName}"!` : `Unblocked channel "${channel.channelName}"!`, 'success');
+        renderDashboard();
+      } catch (error) {
+        renderDashboard();
+        showToast(`Failed to update channel block status: ${error.message}`, 'error');
+      }
     });
   });
 
@@ -1113,6 +1291,14 @@ function openEditChannelModal(channel) {
           </div>
         </div>
 
+        <div class="form-group" style="margin-bottom: 1.5rem;">
+          <label class="toggle-switch-wrapper">
+            <input type="checkbox" id="edit-channel-blocked" class="toggle-switch-input" ${channel.isBlocked ? 'checked' : ''}>
+            <span class="toggle-switch"></span>
+            <span class="toggle-label">Block this channel (disables scheduling)</span>
+          </label>
+        </div>
+
         <div class="modal-footer">
           <button type="button" class="btn btn-outline" id="cancel-edit-modal-btn">Cancel</button>
           <button type="submit" class="btn btn-primary">Save Settings</button>
@@ -1136,6 +1322,7 @@ function openEditChannelModal(channel) {
     const url = document.getElementById('edit-channel-url').value.trim();
     const freq = document.getElementById('edit-channel-frequency').value;
     const targets = Number(document.getElementById('edit-channel-targets').value);
+    const isBlocked = document.getElementById('edit-channel-blocked').checked;
 
     if (!url.startsWith('https://') && !url.includes('youtube.com') && !url.includes('youtu.be')) {
       showToast('Please enter a valid YouTube channel URL.', 'warning');
@@ -1149,12 +1336,13 @@ function openEditChannelModal(channel) {
         channelName: name,
         youtubeUrl: url,
         frequency: freq,
-        targetTasks: targets
+        targetTasks: targets,
+        isBlocked: isBlocked
       });
       showToast(`Updated settings for "${name}"!`, 'success');
       
-      if (channel.frequency !== freq || channel.targetTasks !== targets) {
-        const updatedChannel = { ...channel, channelName: name, youtubeUrl: url, frequency: freq, targetTasks: targets };
+      if (!isBlocked && (channel.frequency !== freq || channel.targetTasks !== targets)) {
+        const updatedChannel = { ...channel, channelName: name, youtubeUrl: url, frequency: freq, targetTasks: targets, isBlocked: isBlocked };
         openAutoScheduleModal(updatedChannel, () => {
           renderDashboard();
         });
@@ -1212,7 +1400,7 @@ async function renderCalendar() {
         <h2>Progress Calendar</h2>
         <p class="view-description">Plan upload schedules and toggle statuses (done / pending / skipped).</p>
       </div>
-      <button class="btn btn-primary" id="schedule-video-btn" ${state.channels.length === 0 ? 'disabled' : ''}>
+      <button class="btn btn-primary" id="schedule-video-btn" ${state.channels.filter(c => !c.isBlocked).length === 0 ? 'disabled' : ''}>
         <i data-lucide="calendar-plus"></i> Schedule Video
       </button>
     </div>
@@ -1503,7 +1691,7 @@ function openScheduleVideoModal() {
         <div class="form-group" style="margin-bottom: 1.25rem;">
           <label class="form-label" for="sched-channel-select">Select Channel</label>
           <select id="sched-channel-select" class="select-styled" style="width:100%;" required>
-            ${state.channels.map(c => `<option value="${c.id}">${c.channelName}</option>`).join('')}
+            ${state.channels.filter(c => !c.isBlocked).map(c => `<option value="${c.id}">${c.channelName}</option>`).join('')}
           </select>
         </div>
         
@@ -1717,7 +1905,7 @@ async function renderWorkshop(channelId) {
         </div>
       </div>
       <div style="display: flex; gap: 0.75rem;">
-        <button class="btn btn-outline" id="auto-schedule-workshop-btn">
+        <button class="btn btn-outline" id="auto-schedule-workshop-btn" ${channel.isBlocked ? 'disabled' : ''}>
           <i data-lucide="calendar-plus"></i> Auto-Schedule
         </button>
         <button class="btn btn-primary" id="add-topic-btn">
@@ -1870,7 +2058,10 @@ async function renderWorkshop(channelId) {
   
   const autoSchedWorkshopBtn = document.getElementById('auto-schedule-workshop-btn');
   if (autoSchedWorkshopBtn) {
-    autoSchedWorkshopBtn.addEventListener('click', () => openAutoScheduleModal(channel));
+    autoSchedWorkshopBtn.addEventListener('click', () => {
+      if (channel.isBlocked) return;
+      openAutoScheduleModal(channel);
+    });
   }
   
   container.querySelectorAll('.btn-edit-topic').forEach(btn => {

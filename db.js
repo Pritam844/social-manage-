@@ -55,9 +55,10 @@ export async function addChannel(uid, channelName, youtubeUrl, frequency = 'week
       youtubeUrl: youtubeUrl || '',
       frequency,
       targetTasks: Number(targetTasks),
+      isBlocked: false,
       createdAt: serverTimestamp()
     });
-    return { id: docRef.id, channelName, youtubeUrl, frequency, targetTasks };
+    return { id: docRef.id, channelName, youtubeUrl, frequency, targetTasks, isBlocked: false };
   } catch (error) {
     console.error("Error adding channel:", error);
     throw error;

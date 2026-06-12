@@ -711,6 +711,74 @@ button, input, select, textarea {
   height: 16px;
 }
 
+/* Blocked Channel Styling */
+.channel-card.blocked {
+  background-color: #f3f4f6;
+  border-color: #d1d5db;
+  box-shadow: none;
+}
+
+.channel-card.blocked:hover {
+  transform: none;
+  box-shadow: none;
+  border-color: #d1d5db;
+}
+
+.channel-card.blocked .channel-avatar {
+  background: #9ca3af !important;
+  color: #f3f4f6;
+  box-shadow: none;
+}
+
+.channel-card.blocked .channel-card-title {
+  color: #6b7280;
+}
+
+.channel-card.blocked .channel-yt-link {
+  color: #9ca3af;
+}
+
+.channel-card.blocked .channel-yt-link:hover {
+  color: #9ca3af;
+  cursor: default;
+}
+
+.channel-card.blocked .badge {
+  background-color: #e5e7eb;
+  color: #6b7280;
+  border-color: #d1d5db;
+}
+
+.channel-card.blocked .tasks-left-badge {
+  background-color: #e5e7eb !important;
+  color: #6b7280 !important;
+}
+
+.channel-card.blocked .channel-card-task-row {
+  opacity: 0.6;
+  background-color: #e5e7eb;
+}
+
+.channel-card.blocked .channel-card-task-row:hover {
+  background-color: #e5e7eb;
+}
+
+.channel-card.blocked .btn-card-auto-schedule {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.channel-card.blocked .btn-card-edit-settings {
+  opacity: 0.7;
+}
+
+.badge-grey {
+  background-color: #e5e7eb;
+  color: #6b7280;
+  border: 1px solid rgba(156, 163, 175, 0.15);
+}
+
 /* Modals */
 .modal-overlay {
   position: fixed;
