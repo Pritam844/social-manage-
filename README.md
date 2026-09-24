@@ -59,44 +59,7 @@
 
 ---
 
-## ⚙️ Getting Started
 
-Follow these instructions to clone and run the project locally on your machine.
-
-### Prerequisites
-
-* [Node.js](https://nodejs.org/) (`v18.0.0` or higher recommended)
-* [npm](https://www.npmjs.com/) or [Git](https://git-scm.com/)
-
-### Installation & Local Run
-
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/Pritam844/social-manage-.git
-   cd social-manage-
-   ```
-
-2. **Install dependencies:**
-   ```bash
-   npm install
-   ```
-
-3. **Start the local development server:**
-   ```bash
-   npm run dev
-   ```
-
-4. **Open in your browser:**
-   ```text
-   http://localhost:5173
-   ```
-
-5. **Generate a production build:**
-   ```bash
-   npm run build
-   ```
-
----
 
 ## 💡 Usage
 
